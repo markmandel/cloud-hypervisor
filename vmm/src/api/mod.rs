@@ -55,7 +55,8 @@ pub use self::dbus::start_dbus_thread;
 pub use self::http::{start_http_fd_thread, start_http_path_thread};
 use crate::Error as VmmError;
 use crate::config::{
-    RestoreConfig, RestoredVfioConfig, VmMemoryZoneUpdateData, deserialize_restored_fd,
+    RestoreConfig, RestoredNetConfig, RestoredVfioConfig, VmMemoryZoneUpdateData,
+    deserialize_restored_fd,
 };
 use crate::device_tree::DeviceTree;
 use crate::migration::transport::{
@@ -325,6 +326,11 @@ pub struct VmReceiveMigrationData {
     /// device's saved path or stale FD in the received VmConfig.
     #[serde(default)]
     pub vfio_fds: Option<Vec<RestoredVfioConfig>>,
+    /// Optional virtio-net device id to FDs pairs (e.g. a tap device opened on
+    /// this host), used to substitute the FDs of devices backed by externally
+    /// provided FDs in the received VmConfig. Mirrors `RestoreConfig::net_fds`.
+    #[serde(default)]
+    pub net_fds: Option<Vec<RestoredNetConfig>>,
     // FDs are not serialized and any deserialized value is invalid; see NetConfig::fds.
     #[serde(default, deserialize_with = "deserialize_restored_fd")]
     pub iommufd_fd: Option<i32>,
@@ -450,6 +456,7 @@ impl VmReceiveMigrationData {
             receiver_url,
             tls_dir,
             vfio_fds,
+            net_fds: None,
             iommufd_fd,
             zone_updates,
             background_fetch_pages,
@@ -2308,6 +2315,7 @@ mod tests {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: None,
                 vfio_fds: None,
+                net_fds: None,
                 iommufd_fd: None,
                 zone_updates: vec![],
                 background_fetch_pages: true,
@@ -2338,6 +2346,7 @@ mod tests {
                 receiver_url: "tcp:192.168.1.1:8080".to_string(),
                 tls_dir: Some(tls_dir_path),
                 vfio_fds: None,
+                net_fds: None,
                 iommufd_fd: None,
                 zone_updates: vec![],
                 background_fetch_pages: true,

@@ -1290,6 +1290,7 @@ impl Vmm {
             .validate_vfio_fds(&vm_migration_config.vm_config.lock().unwrap())
             .map_err(|e| MigratableError::MigrateReceive(e.into()))?;
         apply_vfio_fds_to_vm_config(receive_data_migration, &vm_migration_config.vm_config);
+        apply_net_fds_to_vm_config(receive_data_migration, &vm_migration_config.vm_config);
 
         // Eager prefault populates memory before UFFD is registered, so those
         // pages never fault and are never served. Reject postcopy+prefault
@@ -2448,6 +2449,26 @@ fn apply_vfio_fds_to_vm_config(
         .as_mut()
         .expect("receive-migration validated iommufd=on, so a platform exists")
         .iommufd_fd = Some(iommufd_fd);
+}
+
+// For each matched NetConfig.id backed by FDs, swap the source's stale FDs for
+// the ones received with the request (e.g. a tap device opened on this host).
+// Mirrors the vm_restore handling of RestoreConfig.net_fds.
+fn apply_net_fds_to_vm_config(
+    receive_data_migration: &VmReceiveMigrationData,
+    vm_config: &Arc<Mutex<VmConfig>>,
+) {
+    let Some(net_fds) = receive_data_migration.net_fds.as_deref() else {
+        return;
+    };
+    let mut config = vm_config.lock().unwrap();
+    for net in net_fds {
+        for net_config in config.net.iter_mut().flatten() {
+            if net_config.pci_common.id.as_ref() == Some(&net.id) && net_config.fds.is_some() {
+                net_config.fds.clone_from(&net.fds);
+            }
+        }
+    }
 }
 
 #[allow(unused)]
@@ -3643,7 +3664,7 @@ mod tests {
     use arch::CpuProfile;
 
     use super::*;
-    use crate::config::RestoredVfioConfig;
+    use crate::config::{RestoredNetConfig, RestoredVfioConfig};
     #[cfg(target_arch = "x86_64")]
     use crate::vm_config::DebugConsoleConfig;
     use crate::vm_config::{
@@ -4236,6 +4257,7 @@ mod tests {
             receiver_url: "tcp:127.0.0.1:4321".to_string(),
             tls_dir: None,
             vfio_fds,
+            net_fds: None,
             iommufd_fd,
             zone_updates: vec![],
             background_fetch_pages: true,
@@ -4271,6 +4293,35 @@ mod tests {
         assert!(devices[1].path.is_none());
         assert_eq!(devices[1].fd, Some(5));
         assert_eq!(config.platform.as_ref().unwrap().iommufd_fd, Some(6));
+    }
+
+    #[test]
+    fn test_apply_net_fds_swaps_fds_of_fd_backed_nets() {
+        let mut config = *create_dummy_vm_config();
+        config.net = Some(vec![
+            NetConfig::parse("id=net0,fd=[3,4]").unwrap(),
+            NetConfig::parse("id=net1,tap=tap1").unwrap(),
+        ]);
+        let vm_config = Arc::new(Mutex::new(config));
+        let mut data = receive_data(None, None);
+        data.net_fds = Some(vec![
+            RestoredNetConfig {
+                id: "net0".to_owned(),
+                num_fds: 2,
+                fds: Some(vec![7, 8]),
+            },
+            RestoredNetConfig {
+                id: "net1".to_owned(),
+                num_fds: 1,
+                fds: Some(vec![9]),
+            },
+        ]);
+        apply_net_fds_to_vm_config(&data, &vm_config);
+        let config = vm_config.lock().unwrap();
+        let nets = config.net.as_ref().unwrap();
+        assert_eq!(nets[0].fds, Some(vec![7, 8]));
+        // Only FD-backed devices are re-backed; a named tap is opened by CH itself.
+        assert_eq!(nets[1].fds, None);
     }
 
     #[test]

@@ -627,7 +627,8 @@ impl PutHandler for VmRestore {
 impl GetHandler for VmRestore {}
 
 // Custom handler so the SCM_RIGHTS file pool can be split the same way
-// VmRestore does, cdev FDs for the vfio_fds entries then the iommufd FD.
+// VmRestore does: FDs for the net_fds entries, cdev FDs for the vfio_fds
+// entries, then the iommufd FD.
 impl PutHandler for VmReceiveMigration {
     fn handle_request(
         &'static self,
@@ -639,12 +640,10 @@ impl PutHandler for VmReceiveMigration {
         if let Some(body) = body {
             let mut data: VmReceiveMigrationData = serde_json::from_slice(body.raw())?;
 
+            let net_total: usize = data.net_fds.iter().flatten().map(|c| c.num_fds).sum();
             let vfio_total = data.vfio_fds.as_ref().map_or(0, |c| c.len());
-            let expected = if data.vfio_fds.is_some() {
-                vfio_total + 1
-            } else {
-                0
-            };
+            let iommufd_total = usize::from(data.vfio_fds.is_some());
+            let expected = net_total + vfio_total + iommufd_total;
             if files.len() != expected {
                 error!(
                     "Expected {expected} FDs in VmReceiveMigration request, received {}",
@@ -653,8 +652,13 @@ impl PutHandler for VmReceiveMigration {
                 return Err(HttpError::BadRequest);
             }
 
-            // Split in the order vfio_fds, then the iommufd FD.
+            // Split in the order net_fds, then vfio_fds, then the iommufd FD (as VmRestore).
             let mut files = files;
+            if let Some(cfgs) = data.net_fds.as_mut() {
+                let net_files: Vec<File> = files.drain(..net_total).collect();
+                let mut cfgs = cfgs.iter_mut().collect::<Vec<&mut _>>();
+                attach_fds_to_cfgs(net_files, cfgs.as_mut_slice())?;
+            }
             if let Some(cfgs) = data.vfio_fds.as_mut() {
                 let vfio_files: Vec<File> = files.drain(..vfio_total).collect();
                 let mut cfgs = cfgs.iter_mut().collect::<Vec<&mut _>>();
